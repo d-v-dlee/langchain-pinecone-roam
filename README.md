@@ -19,3 +19,5 @@ This project provides a convenient way to generate well-structured essays using 
 6. repeat steps 2-5 for 5 rounds
 7. compress the 25 summaries 
 8. feed topics + summaries for final essay creation
+
+More info [here](https://github.com/d-v-dlee/god-damn/blob/my-pages/_posts/2023-04-07-words-are-cheap.md)
