@@ -12,12 +12,12 @@ from langchain.chat_models import ChatOpenAI
 from sklearn.metrics.pairwise import cosine_similarity
 from tqdm import tqdm
 
-from chainer import (run_parallel_chains, run_parallel_comprehension, flatten_results,
-                SummaryTemplate, TangenitalIdeasTemplate, EssayTemplate
+from chainer import (run_parallel_chains, flatten_results,
+                SummaryTemplate, TangenitalIdeasTemplate, CompressTemplate, EssayTemplate
                 )
 
-
 logger = logging.getLogger('pinecone_handler')
+logger.setLevel(logging.INFO)
 
 load_dotenv()
 PINECONE_API_KEY = os.getenv('PINECONE_API_KEY')
@@ -26,7 +26,9 @@ OPENAI_API_KEY = os.getenv('OPENAI_API_KEY')
 model = SentenceTransformer('multi-qa-MiniLM-L6-cos-v1')
 
 def sort_strings_by_similarity(ref_string, strings_list):
-    model = SentenceTransformer('multi-qa-MiniLM-L6-cos-v1')
+    """
+    embeds and compares a reference string to a list of strings and returns the list of strings sorted by cosine similarity
+    """
     
     # Encode the reference string and list of strings
     ref_string_embedding = model.encode(ref_string)
@@ -56,9 +58,13 @@ class PineconeHandler:
 
 
     def get_embedding(self, query):
+        """returns a list of floats representing the embedding of the query"""
         return self.model.encode(query).tolist()
     
     def query_index(self, query_embedding, filter=None):
+        """
+        queries the index for the top 5 results.
+        """
         if filter:
             results = self.index.query(query_embedding, top_k=5, includeMetadata=True, filter=filter)
         else:
@@ -67,21 +73,32 @@ class PineconeHandler:
         return results
     
     def embed_and_query(self, query, filter=None):
+        """
+        embeds the query and queries the index for the top 5 results.
+        """
         logger.info(f'Processing query: {query}')
         query_embedding = self.get_embedding(query)
         results = self.query_index(query_embedding, filter=filter)
         return results
     
     def research_and_summarize(self, query, filter=None, num_rounds=5):
+        """
+        embeds the query and queries the index for the top 5 results.
+        then summarizes the results + comes up with a list of tangenital topics to research next. 
+        takes the 3rd most similar topic to the last query and repeats the process for a total of 5 rounds.
+        to get around compression limits, compress the summarization results.
+        finally pass the topics and compressed summarizations for a final essay.
+        """
         llm_35 = ChatOpenAI(model_name="gpt-3.5-turbo")
         llm_4 = ChatOpenAI(model_name="gpt-4")
 
         # define chains
         summary_template = SummaryTemplate(llm_35)
         tangenital_template = TangenitalIdeasTemplate(llm_35)
+        compress_template = CompressTemplate(llm_4)
         essay_template = EssayTemplate(llm_4)
         
-        results_all = {}
+        intermediate_results = {}
         # loop with tqdm
         for i in tqdm(range(num_rounds), desc='Rounds'):
             results = {'retreived_context': [], 'summarized_results': [], 'queries': []}
@@ -96,10 +113,10 @@ class PineconeHandler:
             results['retreived_context'].append(retrieved_context)
             results['summarized_results'].append(summaries)
             results['queries'].append(query)
-            results_all[i] = results
+            intermediate_results[i] = results
 
             # get potential next topics and choose 3rd most similar to last query
-            potential_next_topics = run_parallel_comprehension(summaries, tangenital_template)
+            potential_next_topics = run_parallel_chains(summaries, tangenital_template)
             potential_next_topics = [x.lower().split('primary topic:')[1].strip() for x in potential_next_topics]
 
             sorted_potential_topics = sort_strings_by_similarity(query, potential_next_topics)
@@ -109,119 +126,19 @@ class PineconeHandler:
                 print(f'New query: {query}')
                 print(f'Moving to round {i+2}')
         
-        topic_context_dict = flatten_results(results_all)
+        logger.info(f'moving to compression...')
+        topic_context_dict = flatten_results(intermediate_results, compress_template)
         
-        # try 3 times, if fail wait 10 seconds and try again
-        print('Working on creating final essay...')
-        tries = 3
-        for i in range(tries):
-            try:
-                final_essay = essay_template.process(topic_context_dict)
-                return final_essay
-            except:
-                time.sleep(10)
-                print('Failed to create final essay, trying again...')
+
+        logger.info(f'moving to essay...')
+        logger.info('note: will often get openai error, langchain should automatically retry...')
+        final_essay = essay_template.process(topic_context_dict)
+
+        result = {
+            'intermediate_results': intermediate_results,
+            'compressed_results': topic_context_dict,
+            'final_essay': final_essay
+        }
+
+        return result
         
-        print('All 3 tries failed, returning intermediate results.')
-        return results_all
-
-    
-    # def process(self, query, filter=None, num_rounds=5):
-    #     logger.info(f'Processing query: {query}')
-    #     query_embedding = self.get_embedding(query)
-    #     results = self.query_index(query_embedding, filter=filter)
-    #     texts = extract_text_from_matches(results['matches'])
-
-    #     intermediate_results = [results]
-    #     summarized_results = []
-    #     queries = [query]
-    #     for round_num in range(num_rounds):
-    #         logger.info(f'Round {round_num + 1}/{num_rounds}: Processing retrieved context...')
-    #         with concurrent.futures.ThreadPoolExecutor() as executor:
-    #             futures = [executor.submit(process_match, query, context, self.llm) for context in texts]
-    #             distilled_insights = [future.result() for future in concurrent.futures.as_completed(futures)]
-    #             summarized_results.extend(distilled_insights)
-        
-    #         # Generate new phrase based on the context and repeat the loop
-    #         logger.info(f'Round {round_num + 1}/{num_rounds}: Generating new phrases...')
-    #         query = generate_new_phrase(query, distilled_insights, self.llm)
-    #         queries.append(query)
-    #         logger.info(f'New query: {query}')
-    #         print(f'New query: {query}')
-            
-    #         query_embedding = self.get_embedding(query)
-            
-    #         results = self.query_index(query_embedding, filter=filter)
-    #         intermediate_results.append(results)
-            
-    #         texts = extract_text_from_matches(results['matches'])
-
-    #     results_dict = {
-    #         'intermediate_results': intermediate_results,
-    #         'summarized_results': summarized_results,
-    #         'queries': queries
-    #     }
-
-    #     return results_dict
-
-        # # Process the matches using parallel execution
-        # logger.info('Processing retrieved context...')
-        # with concurrent.futures.ThreadPoolExecutor() as executor:
-
-        #     with concurrent.futures.ThreadPoolExecutor() as executor:
-        #         futures = [executor.submit(process_match, query, context, self.llm) for context in texts]
-        #         distilled_insights = [future.result() for future in concurrent.futures.as_completed(futures)]
-
-        # # Combine distillations
-        # combined_result = combine_distillations(query, distilled_insights, self.llm)
-        # return combined_result, results
-
-def process_match(user_query, context, llm):
-    multiple_input_prompt = PromptTemplate(
-        input_variables=["user_query", "context"], 
-        template="""Distill the key ideas, insights, or principles from the following context related \
-        to the user's query in 3-5 sentences. \
-        Include another 3 sentence paragraph on any interesting tangential ideas or topics provided in the context.
-        User query: {user_query}
-
-        Context: {context}
-        """
-    )
-
-    chain = LLMChain(llm=llm, prompt=multiple_input_prompt)
-    return chain.run({'user_query': user_query, 'context': context})
-
-def generate_new_phrase(previous_user_query, context, llm):
-    new_phrase_prompt = PromptTemplate(
-        input_variables=["previous_user_query", "context"], 
-        template="""Imagine youre conducting research for a blog post. \
-            Based on the context, suggest a new but related topic, phrase, or question that \
-            can be explored further. Make sure it doesn't repeat the same idea or phrase from the previous \
-            user query.  Be creative yet descriptive with the associated query.\
-            user query: {previous_user_query}
-            Context: {context}
-            """
-    )
-
-    chain = LLMChain(llm=llm, prompt=new_phrase_prompt)
-    return chain.run({'previous_user_query': previous_user_query, 'context': context})
-
-
-def extract_text_from_matches(matches):
-    return [match['metadata']['text'] for match in matches]
-
-def combine_distillations(user_query, distillations, llm):
-    context = ' '.join(x for x in distillations)
-
-    summary_prompt = PromptTemplate(
-        input_variables=["user_query", "context"], 
-        template="""Distill and summarize the key ideas, insights, or principles from the following \
-        context related to the user's query.
-        User query: {user_query}
-
-        Context: {context}
-        """
-    )
-
-    summary_chain = LLMChain(llm=llm, prompt=summary_prompt)
-    return summary_chain.run({'user_query': user_query, 'context': context})

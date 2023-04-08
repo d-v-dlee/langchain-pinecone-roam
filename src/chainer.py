@@ -13,18 +13,24 @@ OPENAI_API_KEY = os.getenv('OPENAI_API_KEY')
 llm = ChatOpenAI(model_name="gpt-3.5-turbo")
 
 def run_parallel_chains(input_data, XTemplate):
+    """helper function used to run multiple chains in parallel"""
     with concurrent.futures.ThreadPoolExecutor() as executor:
         futures = [executor.submit(XTemplate.process, data) for data in input_data]
         results = [future.result() for future in concurrent.futures.as_completed(futures)]
     return results
 
-def run_parallel_comprehension(texts, XTemplate):
-    with concurrent.futures.ThreadPoolExecutor() as executor:
-        futures = [executor.submit(XTemplate.process, text) for text in texts]
-        results = [future.result() for future in concurrent.futures.as_completed(futures)]
-    return results
+# def run_parallel_comprehension(texts, XTemplate):
+#     with concurrent.futures.ThreadPoolExecutor() as executor:
+#         futures = [executor.submit(XTemplate.process, text) for text in texts]
+#         results = [future.result() for future in concurrent.futures.as_completed(futures)]
+#     return results
 
-def flatten_results(results):
+def compress_text(text, compress_template):
+    context = {'text': text}
+    compressed_text = compress_template.process(context)
+    return compressed_text
+
+def flatten_results(results, compress_template):
     """helper function used to flatten results from multiple rounds of research and summarize"""
     topics = []
     context = []
@@ -33,12 +39,20 @@ def flatten_results(results):
         topics.append(v['queries'][0])
         context.append(' '.join(v['summarized_results'][0]))
 
+    # Compress summaries individually
+    print('Compressing context...')
+    compressed_summaries = [compress_text(summary, compress_template) for summary in context]
+
     # Join topics and context with numbered points
-    flattened_results = {
-        'topics': '\n'.join(f"{i+1}. {topic}" for i, topic in enumerate(topics)),
-        'context': '\n'.join(f"{i+1}. {summary}" for i, summary in enumerate(context))
+    flattened_topics = '\n'.join(f"{i+1}. {topic}" for i, topic in enumerate(topics))
+    flattened_context = '\n'.join(f"{i+1}. {summary}" for i, summary in enumerate(compressed_summaries))
+
+    compressed_flattened_results = {
+        'topics': flattened_topics,
+        'context': flattened_context
     }
-    return flattened_results
+
+    return compressed_flattened_results
 
 class BasePromptTemplate:
     def __init__(self, llm, input_variables, template):
@@ -72,18 +86,24 @@ class TangenitalIdeasTemplate(BasePromptTemplate):
     def __init__(self, llm):
         self.input_variables = ['context']
 
-        # self.template_string = """Imagine you're writing a blog.
-        # If you had to tag the following text with 7 topics that could then be connected to other passages or ideas, 
-        # what would they be? Think step by step. Produce a mix of logical and surprising topics. 
-        # The wording should be optimized for semantic search. Once you have shared the 7 topics, share one final topic that you think you should research next:
-
-        # Context: {context}
-        # """
-
-        self.template_string = """Examine the context below and extract 7 themes or subjects that can establish connections with other relevant ideas or topics. Strive for a blend of expected and creative connections, with a focus on semantic search compatibility. Once you've identified the 7 themes, suggest the primary topic for your next research endeavor.
+        self.template_string = """Examine the context below and extract 5 themes or subjects that can establish connections with other relevant ideas or topics. Strive for a blend of expected and creative connections, with a focus on semantic search compatibility. Once you've identified the 7 themes, suggest the primary topic for your next research endeavor.
         Return the final topic like: 'Primary topic: <your answer>
         
         Context: {context}"""
+        super().__init__(llm, self.input_variables, self.template_string)
+
+class CompressTemplate(BasePromptTemplate):
+    """
+    Template for getting a compressed version of a context.
+    """
+    def __init__(self, llm):
+        self.input_variables = ['text']
+
+        self.template_string = """
+        compress the following text in a way that is lossless but results in the minimum number of tokens which could be fed into an LLM like yourself as-is and produce the same output. feel free to use multiple languages, symbols, other up-front priming to lay down rules. this is entirely for yourself to recover and proceed from with the same conceptual priming, not for humans to decompress:
+        
+        Text: {text}
+        """
         super().__init__(llm, self.input_variables, self.template_string)
 
 class EssayTemplate(BasePromptTemplate):
